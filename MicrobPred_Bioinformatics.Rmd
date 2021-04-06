@@ -262,6 +262,11 @@ https://doi.org/10.1089/cmb.2014.0156
 # Root to archaea in Dendroscope. Identify weird branches here.
 # Export as "138_plus_asvs_rooted.tre".
 # Filter: (1) Silva set, (2) contaminants, (3) weirdo branches, and (4) retain 10 re-named archaea.
+filter_samples_from_otu_table.py -i 16S_table.biom -o MicrobPred_16S_nocont.biom --sample_id_fp control_sample_list.txt --negate_sample_id_fp
+filter_otus_from_otu_table.py -i MicrobPred_16S_nocont.biom -o MicrobPred_16S_nocont_nosingles.biom -n 3
+biom summarize-table -i 16S_table.biom -o 16S_table_summary.txt # 144 1108
+biom summarize-table -i MicrobPred_16S_nocont.biom -o MicrobPred_16S_nocont_summary.txt # 80 1108
+biom summarize-table -i MicrobPred_16S_nocont_nosingles.biom -o MicrobPred_16S_nocont_nosingles_summary.txt # 80 828
 # Match remaining ASVs in tree to table.
 ```
 
