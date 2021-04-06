@@ -1,0 +1,883 @@
+---
+title: "Code for 'Predation influences the temperature response of microbial communities'"
+author: "Rocca, JD, Yammine, A, Simonin, M., Gibert, JP"
+date: "4/06/2021"
+output:
+  html_document:
+    toc: true
+    toc_float: TRUE
+---
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+require(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+```
+
+# Overview  
+  1. Sequence Data Preparation
+      Dada2 of sequencing runs (incl. putative chimera removal)
+          3801 ASVs
+      Run Lulu to reduce artificial ASVs
+          1423 ASVs
+      Assign taxonomy
+      Identify/remove non-targets
+        Make referenced alignment (with Silva 138) and phylogeny in PASTA (to flag weirdly aligned)
+        Remove non-target groups (e.g., Chloroplasts, Mitochondria, and non-Bacteria) and those that do not align
+  2. Data Analysis
+      Calculate richness on final Bacteria-only 16S files
+      Prep data for compositional analysis
+        Remove singletons
+        VST Data transformation
+
+
+***************************************************************************************
+# Dada2 ASV Creation
+```
+following the 16S Dada2 tutorial: https://benjjneb.github.io/dada2/tutorial.html
+```
+### Set path
+```{r}
+path <- "~/Dropbox/MicrobPred/Bioinformatics_Aug2020/" 
+list.files(path)
+```
+### Read in Fastqs
+```{r}
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_L001_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_L001_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+### Examine quality
+```{r}
+par(mfrow=c(4,1))
+plotQualityProfile(fnFs[1:2]) # Forward - first two samples
+plotQualityProfile(fnRs[1:2]) # Reverse - first two samples
+```
+### Assign filtered files names and place in 'filtered/' subdirectory
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+```
+### Filter and Trim
+```{r}
+# maxEE sets max number of “expected errors” allowed in a read, here relaxed in Reverse cause they're not great.
+# maintaining full reads, even with R not so great, so no truncLen.
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(250,250),
+              maxN=0, maxEE=c(2,5), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE)
+head(out)
+#                                  reads.in reads.out
+# Gib1_S1_L001_R1_001.fastq.gz        42212     34958
+# Gib10_S152_L001_R1_001.fastq.gz     54853     47139
+```
+### Learn Error Rates
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+# 105098750 total bases in 420395 reads from 8 samples will be used for learning the error rates.
+errR <- learnErrors(filtRs, multithread=TRUE)
+# 105098750 total bases in 420395 reads from 8 samples will be used for learning the error rates.
+```
+### Confirm error rates look kosher
+```{r}
+# nominal Q is red line (error rates expected under nominal defn of q-score)
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+# Yes, both fairly close to the error rates expected under nominal conditions (red line)
+```
+### Core Sample Inference
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+### Merge pair ends into contigs
+```{r}
+# most should merge, unless those R reads really are crap, then don't use and don't merge PE.
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+# Looks good
+```
+### Construct sequence table
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+# Good length distribution: in the 250-255 range.
+
+# several ~429bp - non-specific priming, or issues with that reverse read. Subsetting only the designated size range.
+seqtab <- seqtab[,nchar(colnames(seqtab)) %in% 250:256]
+table(nchar(getSequences(seqtab)))
+```
+### Remove putative chimera
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+# 3801 ASVs; 144 microbiomes
+sum(seqtab.nochim)/sum(seqtab)
+# 98.7% retention
+```
+### Track read retention through Dada2
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+### Extract "ASV_" formatted fasta file and table
+```{r}
+# Changing MD5's to manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+# Output fasta of our final ASV seqs:
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "MicrobPred_repseqs.fasta")
+# 3801 ASVsm (was ~3200 with Dada2 in Qiime2)
+
+# Output community table:
+asv_table <- t(seqtab.nochim)
+row.names(asv_table) <- sub(">", "", asv_headers)
+write.table(asv_table, "MicrobPred_table.tsv", sep="\t", quote=F, col.names=NA)
+```
+
+***************************************************************************************
+# Lulu Curation
+```
+Following the Lulu tutorial: https://www.nature.com/articles/s41467-017-01312-x,
+https://github.com/tobiasgf/lulu. Modified protocol from the Hawkes Lab (NCSU). Uses local blast to reduce the potentially overinflated diversity from raw Dada2 output.
+```
+### Install local blast (following: https://www.ncbi.nlm.nih.gov/books/NBK279671/)
+```
+# Download the "ncbi-blast-2.10.0+.dmg". Install.
+# Navigate to dada2 output folder:
+cd 1_Dada2
+# Make local blast db out of dada2 output repseqs.
+makeblastdb -in MicrobPred_repseqs.fasta -parse_seqids -dbtype nucl
+```
+### Blast the ASVs against the database
+```
+blastn -db MicrobPred_repseqs.fasta -outfmt "6 qseqid sseqid pident" -out match_list.txt -qcov_hsp_perc 80 -perc_identity 84 -query MicrobPred_repseqs.fasta
+# move output to blastn folder
+```
+### Lulu install
+```{r}
+library(devtools)
+install_github("tobiasgf/lulu", force=TRUE) 
+library(lulu); packageVersion("lulu")
+```
+### Read in resulting match file from local blast, comm. table from Dada2
+```{r}
+matchlist <- read.delim("~/2_blastn_output/match_list.txt", header=FALSE, stringsAsFactors = FALSE) 
+str(matchlist) 
+# Should be 3 cols & first two ASV cols are characters to match ASVtable designations
+
+MicrobPred_ASV <- read.delim("~/MicrobPred_table.tsv", header=T, row.names=1)
+View(MicrobPred_ASV)
+otutab <- as.data.frame(MicrobPred_ASV)
+str(otutab)
+```
+### Run Lulu curation; save results
+```{r}
+curated_result <- lulu(otutab, matchlist)
+MicrobPred_lulu_table <- curated_result$curated_table
+write.table(MicrobPred_lulu_table, "MicrobPred_lulu_table.txt")
+#dimensions: 	52,411 x 302
+#previous:	160,826 x 302
+MicrobPred_lulu_table_discards <- curated_result$discarded_otus
+write.table(MicrobPred_lulu_table_discards, "MicrobPred_ASVs_lulu_discards.txt")
+MicrobPred_lulu_table_retained <- curated_result$curated_otus
+write.table(MicrobPred_lulu_table_retained, "MicrobPred_ASVs_lulu_retained.txt")
+```
+### What's retained; collapsed
+```{r}
+curated_result$curated_count
+#retained 1423 ASVs
+curated_result$discarded_count
+#collapsed 2378 ASVs (not discarded, but lumped into the corresponding ASV it is likely to be)
+```
+### Subset the “MicrobPred_repseqs.fasta” to reflect the collapsed, post-Lulu set of ASVs
+macqiime #antiquated but works just fine for this ;)
+filter_fasta.py -f 1_Dada2/MicrobPred_repseqs.fasta -o 3_Lulu_curation/MicrobPred_lulu_repseqs.fasta -s 3_Lulu_curation/MicrobPred_ASVs_lulu_retained.txt
+count_seqs.py -i 3_Lulu_curation/MicrobPred_lulu_repseqs.fasta
+#In: 3801
+#Out: 1423
+
+
+***************************************************************************************
+# Assign Taxonomy
+
+### Reformatting Silva 138 for classify-consensus-blast
+```
+# The original files from Silva, were manipulated by Pat Schloss and those are still available in SILVA_138_release/Mothur_Formatted
+# The fasta alignment and taxonomy files each have 146,796 sequences.
+# Maybe the taxonomy doesn't need to be amended, and the "D_1__" marks from qiime2 are unnecessary.
+# Back generate the reference sequences from the alignment
+sed '/^\./ s/\./-/' silva.nr_v138_aln.fasta > intermediate.fasta
+sed '/^-/ s/\./-/g' intermediate.fasta > intermediate_alignment.fasta
+sed 's/-//g' intermediate_alignment.fasta > 138_repseqs.fasta
+sed '/^>/ s/	.*//g' intermediate_alignment.fasta > 138_alignment.fasta
+```
+### Assign taxonomy to SILVA 138
+```
+conda activate qiime2-2020.8
+qiime tools import \
+  --input-path 3_Lulu_curation/MicrobPred_lulu_repseqs.fasta \
+  --output-path 3_Lulu_curation/MicrobPred_lulu_repseqs.qza \
+  --type 'FeatureData[Sequence]'
+qiime tools import \
+  --input-path 138_repseqs.fasta \
+  --output-path 138_repseqs.qza \
+  --type 'FeatureData[Sequence]'
+qiime tools import \
+  --input-path 138_taxonomy.txt \
+  --output-path 138_taxonomy.qza \
+  --type 'FeatureData[Taxonomy]'
+qiime feature-classifier classify-consensus-blast \
+  --i-query 3_Lulu_curation/MicrobPred_lulu_repseqs.qza \
+  --i-reference-reads 138_repseqs.qza \
+  --i-reference-taxonomy 138_taxonomy.qza \
+  --o-classification 4_Taxa_Silva138/MicrobPred_Tax_Silva138
+cp MicrobPred_Tax_Silva138.qza MicrobPred_Tax_Silva138.zip
+```
+
+***************************************************************************************
+# MSA and Phylogeny
+
+### Multiple Seq Alignment
+```
+# Make a referenced alignment against the Silva 138 curated full-length 16S rRNA alignment
+(https://mafft.cbrc.jp/alignment/software/macosx.html for local install)
+mafft --add MicrobPred_lulu_repseqs.fasta 138_seed.fasta > 138_plus_asvs.fasta
+# Open in AliView. Trim to V4. Saved as "MASKED_138_plus_asvs.fasta" (2400 bp long; 8866 seqs)
+```
+### Make phylogeny & updated alignment in PASTA 
+```
+https://doi.org/10.1089/cmb.2014.0156
+# Using standard settings, except return Best, not Final tree. Saved as "138_plus_asvs.tre"
+# Root to archaea in Dendroscope. Identify weird branches here.
+# Export as "138_plus_asvs_rooted.tre".
+# Filter: (1) Silva set, (2) contaminants, (3) weirdo branches, and (4) retain 10 re-named archaea.
+# Match remaining ASVs in tree to table.
+```
+
+***************************************************************************************
+# Calculate Alpha Diversity
+
+### Import ASV table and tree into Qiime2
+```
+# Includes just microbiomes in the incubation, so no controls and no pre-treatment microbiomes (T0).
+conda activate qiime2-2020.8
+qiime tools import \
+  --input-path MicrobPred_incubation_table.biom \
+  --type 'FeatureTable[Frequency]' \
+  --input-format BIOMV100Format \
+  --output-path MicrobPred_incubation_table.qza		
+qiime tools import \
+  --input-path MicrobPred_incubation.tre \
+  --output-path MicrobPred_incubation_tree.qza \
+  --type 'Phylogeny[Rooted]'
+```
+### Calculate rarefied alpha diversity
+```
+# Lowest sequencing depth: Gib_94: 8620.0
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny MicrobPred_incubation_tree.qza \
+  --i-table MicrobPred_incubation_table.qza \
+  --p-sampling-depth 8600 \
+  --m-metadata-file MicrobPred_treatments_incub_only.txt \
+  --output-dir MicrobPred_core_metrics_q2
+```
+### Calculate group significance of each diversity index
+```
+# treatment effects on phylo diversity
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity MicrobPred_core_metrics_q2/faith_pd_vector.qza \
+  --m-metadata-file MicrobPred_treatments_incub_only.txt \
+  --o-visualization MicrobPred_core_metrics_q2/faith-pd-group-significance.qzv
+# treatment effects on evenness
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity MicrobPred_core_metrics_q2/evenness_vector.qza \
+  --m-metadata-file MicrobPred_treatments_incub_only.txt \
+  --o-visualization MicrobPred_core_metrics_q2/evenness-group-significance.qzv
+# treatment effects on shannon diversity
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity MicrobPred_core_metrics_q2/shannon_vector.qza \
+  --m-metadata-file MicrobPred_treatments_incub_only.txt \
+  --o-visualization MicrobPred_core_metrics_q2/shannon-group-significance.qzv
+# treatment effects on ASV richness
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity MicrobPred_core_metrics_q2/observed_features_vector.qza \
+  --m-metadata-file MicrobPred_treatments_incub_only.txt \
+  --o-visualization MicrobPred_core_metrics_q2/observed_features-group-significance.qzv
+```
+### Plot alpha-diversity indices
+```{r}
+library(ggplot2)
+adiv  <- read.delim("MicrobPred_alpha_diversity.txt", header=T, row.names=1)
+adiv$TempTime <- paste(adiv$Temperature, adiv$Incubation, sep="_")
+adiv$TempTime <-as.factor(adiv$TempTime)
+adiv$Protist <- factor(adiv$Protist , levels=c("JustMedia", "Tetrahymena", "Colpidium"))
+#By temp and time
+temp.shannon <- ggplot(adiv, aes(x=Incubation, y=shannon, colour=Temperature)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Ambient"="#0072B2","Temp"="#D55E00")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+temp.pielou <- ggplot(adiv, aes(x=Incubation, y=pielou, colour=Temperature)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Ambient"="#0072B2","Temp"="#D55E00")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+temp.obsASVs <- ggplot(adiv, aes(x=Incubation, y=obs_asvs, colour=Temperature)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Ambient"="#0072B2","Temp"="#D55E00")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+temp.pd <- ggplot(adiv, aes(x=Incubation, y=faith, colour=Temperature)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Ambient"="#0072B2","Temp"="#D55E00")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+## By Protists
+protist.shannon <- ggplot(adiv, aes(x=Protist, y=shannon, colour=Protist)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Tetrahymena"="#E69F00","Colpidium"="#CC79A7","JustMedia" = "#009E73")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+protist.pielou <- ggplot(adiv, aes(x=Protist, y=pielou, colour=Protist)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Tetrahymena"="#E69F00","Colpidium"="#CC79A7","JustMedia" = "#009E73")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+protist.obsASVs <- ggplot(adiv, aes(x=Protist, y=obs_asvs, colour=Protist)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Tetrahymena"="#E69F00","Colpidium"="#CC79A7","JustMedia" = "#009E73")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+protist.pd <- ggplot(adiv, aes(x=Protist, y=faith, colour=Protist)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(aes(shape=TempTime), size=3, position = position_jitterdodge(jitter.width = 0.7)) + 
+  scale_colour_manual(values=c("Tetrahymena"="#E69F00","Colpidium"="#CC79A7","JustMedia" = "#009E73")) +
+  scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+  theme_bw() +
+  theme(axis.title.y = element_text(size=18), # remove y-axis labels
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),  #remove major-grid labels
+  panel.grid.minor = element_blank(),  #remove minor-grid labels
+  plot.background = element_blank(), legend.position = "none")
+```
+### Full model on a-div indices
+```{r}
+shannon.aov <- aov(shannon ~ temp*time*protist, data = adiv)
+pielou.aov <- aov(pielou ~ temp*time*protist, data = adiv)
+obs.aov <- aov(obs ~ temp*time*protist, data = adiv)
+pd.aov <- aov(pd ~ temp*time*protist, data = adiv)
+
+summary(shannon.aov)
+summary(pielou.aov)
+summary(obs.aov)
+summary(pd.aov)
+
+TukeyHSD(shannon.aov)
+TukeyHSD(pielou.aov)
+TukeyHSD(obs.aov)
+TukeyHSD(pd.aov)
+```
+### Protist effects on a-div
+```{r}
+shannon.protist.aov <- aov(shannon ~ protist, data = adiv)
+pielou.protist.aov <- aov(pielou ~ protist, data = adiv)
+obs.protist.aov <- aov(obs ~ protist, data = adiv)
+pd.protist.aov <- aov(pd ~ protist, data = adiv)
+
+# nada, zilch, no impacts of protists on bacterial alpha diversity
+summary(shannon.protist.aov)
+summary(pielou.protist.aov)
+summary(obs.protist.aov)
+summary(pd.protist.aov)
+```
+### Impacts of temperature and incubation time on a-div
+```{r}
+shannon.tt.aov <- aov(shannon ~ temp*time, data = adiv)
+pielou.tt.aov <- aov(pielou ~ temp*time, data = adiv)
+obs.tt.aov <- aov(obs ~ temp*time, data = adiv)
+pd.tt.aov <- aov(pd ~ temp*time, data = adiv)
+
+summary(shannon.tt.aov)
+summary(pielou.tt.aov)
+summary(obs.tt.aov)
+summary(pd.tt.aov)
+```
+### Group Means
+```{r}
+library(dplyr)
+#temptime
+adiv$TempTime <- paste0(adiv$Temperature,adiv$Incubation)
+
+adiv %>%
+  group_by(TempTime) %>%
+  summarise_at(vars(shannon),
+               list(name = mean))
+adiv %>%
+  group_by(TempTime) %>%
+  summarise_at(vars(pielou),
+               list(name = mean))
+adiv %>%
+  group_by(TempTime) %>%
+  summarise_at(vars(obs_asvs),
+               list(name = mean))
+adiv %>%
+  group_by(TempTime) %>%
+  summarise_at(vars(faith),
+               list(name = mean))
+#protists
+adiv %>%
+  group_by(Protist) %>%
+  summarise_at(vars(shannon),
+               list(name = mean))
+adiv %>%
+  group_by(Protist) %>%
+  summarise_at(vars(pielou),
+               list(name = mean))
+adiv %>%
+  group_by(Protist) %>%
+  summarise_at(vars(obs_asvs),
+               list(name = mean))
+adiv %>%
+  group_by(Protist) %>%
+  summarise_at(vars(faith),
+               list(name = mean))
+```
+
+
+***************************************************************************************
+# Variance-stabilizing transformation 
+```
+# Citations
+tutorial: https://joey711.github.io/phyloseq-extensions/DESeq2.html
+necessity: https://doi.org/10.3389/fmicb.2017.02224
+```
+### Remove Singletons
+```
+Saved as:
+MicrobPred_16S_nocont_nosingles.fasta
+MicrobPred_16S_nocont_nosingles.biom
+```
+### Load Packages
+```{r}
+#install.packages('BiocManager')
+#library('BiocManager')
+#BiocManager::install('phyloseq')
+library("phyloseq"); packageVersion("phyloseq")
+library(picante)
+```
+### Read in Files
+```{r}
+# Sample Information
+pred.samples <- read.delim("~/MicrobPred_treatments_incub_only.txt", header=T, row.names=1)
+pred.samples$TempTime <- paste(pred.samples$Temperature, pred.samples$Incubation, sep="_")
+
+# ASV table
+pred.comm <- read.delim("~/MicrobPred_incubation_table.txt",header=T,row.names=1)
+pred.comm <- as.matrix(pred.comm)
+
+# Taxa
+pred.tax <- read.delim("~/16S_MicrobPred_TAX_7.txt", header=T, row.names=1)
+
+# Phylogeny
+pred.tree <- read_tree("MicrobPred_incubation.tre")
+```
+### Subset table for the 16S set of terminal nodes in the tree.
+```{r}
+matchphycom = match.phylo.data(pred.tree, pred.comm) # Prunes the full community table to the 16S tree terminal nodes
+community <- matchphycom$data
+community <- as.matrix(community)
+phylogeny <- matchphycom$phy
+
+matchphytax = match.phylo.data(phylogeny, pred.tax) # Prunes the taxonomy to the 16S tree.
+taxonomy <- matchphytax$data
+taxonomy <- as.matrix(taxonomy)
+```
+### Making phyloseq obj of taxonomy, table, tree, and sample data
+```{r}
+OTU=otu_table(community,taxa_are_rows = TRUE)
+TAX=tax_table(taxonomy)
+sampledata=sample_data(pred.samples)
+physeq = phyloseq(OTU, TAX, sampledata, phylogeny)
+physeq
+```
+### Convert Phyloseq to Deseq object
+```{r}
+library("DESeq2"); packageVersion("DESeq2")
+ps_predation<-physeq
+ps_pred_dds <- phyloseq_to_deseq2(ps_predation, ~1)
+```
+### Estimate size factors and dispersion - 
+```{r}
+ps_pred_dds <- estimateSizeFactors(ps_pred_dds)
+ps_pred_dds <- estimateDispersions(ps_pred_dds, fitType = "local")
+
+# OUTPUT:
+# gene-wise dispersion estimates
+# mean-dispersion relationship
+# final dispersion estimates
+```
+### Run the VST
+```{r}
+ps_pred_vst <- ps_predation
+vst<-getVarianceStabilizedData(ps_pred_dds)
+otu_table(ps_pred_vst) <- otu_table(vst, taxa_are_rows = TRUE)
+ps_pred_vst
+```
+### Export results.
+```{r}
+MicrobPred_VST <-otu_table(ps_pred_vst)
+write.table(MicrobPred_VST, "9_transforms/VST/MicrobPred_vst.txt", sep=",")
+```
+
+
+***************************************************************************************
+# Calculate and Analyze Beta Diversity
+
+# Adonis - Test group treatment impactts
+
+### Full model
+```{r}
+pred.adonis <- adonis(pred.vst ~ protist*temp*time, data=pred.samples, permutations=999)
+pred.adonis
+```
+
+### pw. adonis
+```{r}
+library(pairwiseAdonis); packageVersion("pairwiseAdonis")
+
+# add temp/time column, since you can't have >1 factor listed
+pred.samples$TempTime<-paste(pred.samples$Temperature,pred.samples$Incubation,sep="_")
+
+pw.adonis.tt <- pairwise.adonis(x = pred.vst, factors = pred.samples$TempTime)
+pw.adonis.tt
+
+pw.adonis.protist <- pairwise.adonis(x = pred.vst, factors = pred.samples$Protist)
+pw.adonis.protist
+```
+
+
+# PCoA with Euclidean Distance
+### Load packages
+```{r}
+library(vegan)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+```
+### Load data
+```{r}
+pred.samples <- read.delim("~/MicrobPred_treatments_incub_only.txt", header=T, row.names=1)
+dim(pred.samples)
+
+pred.vst <- read.table("~/MicrobPred_vst_positive.txt",row.names=1,header=T,check.names=F)
+pred.vst<-t(pred.vst)
+pred.vst<-as.data.frame(pred.vst)
+dim(pred.vst)
+```
+### PCA
+```{r}
+pred.pca<-prcomp(pred.vst)
+
+pred.pca.coord <- as.data.frame(pred.pca$x)
+pred.pca.coord$group <- sapply( strsplit(as.character(row.names(pred.vst)), "_"), "[[", 1 )
+head(pred.pca.coord)
+
+screeplot(pred.pca)
+summary(pred.pca)
+```
+### Plot of temp * time
+```{r}
+pred.pca.plot.temp<- ggplot() +
+geom_point(data=pred.pca.forplot,aes(x=PC1,y=PC2,shape=TempTime,colour=Temperature),size=2) + # add the point markers
+scale_colour_manual(values=c("Ambient"="#0072B2","Temp"="#D55E00")) +
+scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+#stat_ellipse(geom = "polygon", type="norm", alpha=0.4, aes(fill=Temperature)) +
+theme_bw() +
+ylim(-20, 18) +
+xlim(-18, 33) +
+ggtitle("Temp and Time Impacts on Bacterial Community Structure") +
+xlab("PC1 (15.9%)") +
+ylab("PC2 (5.5%)") +
+theme(panel.background = element_blank(),
+panel.grid.major = element_blank(),  #remove major-grid labels
+panel.grid.minor = element_blank(),  #remove minor-grid labels
+plot.background = element_blank(), legend.position = "none")
+
+pred.pca.plot.temp
+```
+### Plot by protist
+```{r}
+pred.pca.plot.protist<- ggplot() +
+geom_point(data=pred.pca.forplot,aes(x=PC3,y=PC4,shape=TempTime, colour=Protist),size=2) + # add the point markers
+scale_colour_manual(values=c("Tetrahymena"="#E69F00","Colpidium"="#CC79A7","JustMedia" = "#009E73")) +
+scale_shape_manual(values=c("Ambient_Early_12"=1,"Ambient_Late_24"=2,"Temp_Early_12"=16,"Temp_Late_24"=17)) +
+ylim(-22, 20) +
+xlim(-16, 15) +
+theme_bw() +
+ggtitle("Impact of Protists on Aquatic Bacterial Community Structure") +
+xlab("PC3 (5%)") +
+ylab("PC4 (3.8%)") +
+theme(panel.background = element_blank(),
+panel.grid.major = element_blank(),  #remove major-grid labels
+panel.grid.minor = element_blank(),  #remove minor-grid labels
+plot.background = element_blank(), legend.position = "none")
+
+pred.pca.plot.protist
+```
+
+# Betadispersion
+### Generate bray-curtis distance matrix
+```{r}
+bc.dist <- vegdist(pred.vst, method="bray")
+```
+
+# temp-time multivariate within group dispersion
+```{r}
+betadisp.tt <- betadisper(bc.dist, pred.samples$TempTime)
+betadisp.tt
+
+# test
+anova(betadisp.tt)
+
+# permute for F
+permutest(betadisp.tt, pairwise=TRUE, permutations=999)
+
+# Tukey
+mod.hsd.tt <- TukeyHSD(betadisp.tt)
+plot(mod.hsd.tt)
+```
+# temp
+```{r}
+# Calculate multivariate within group dispersion
+betadisp.temp <- betadisper(bc.dist, pred.samples$Temperature)
+betadisp.temp
+
+# test
+anova(betadisp.temp)
+
+# permute for F
+permutest(betadisp.temp, pairwise=TRUE, permutations=999)
+
+# Tukey
+mod.hsd.temp <- TukeyHSD(betadisp.temp)
+plot(mod.hsd.temp)
+```
+# time
+```{r}
+# Calculate multivariate within group dispersion
+betadisp.time <- betadisper(bc.dist, pred.samples$Incubation)
+betadisp.time
+
+# test
+anova(betadisp.time)
+
+# permute for F
+permutest(betadisp.time, pairwise=TRUE, permutations=999)
+
+# Tukey
+mod.hsd.time <- TukeyHSD(betadisp.time)
+plot(mod.hsd.time)
+```
+# protist
+```{r}
+# Calculate multivariate within group dispersion
+betadisp.protist <- betadisper(bc.dist, pred.samples$Protist)
+betadisp.protist
+
+# test
+anova(betadisp.protist)
+
+# permute for F
+permutest(betadisp.protist, pairwise=TRUE, permutations=999)
+
+# Tukey
+mod.hsd.protist <- TukeyHSD(betadisp.protist)
+plot(mod.hsd.protist)
+```
+
+
+***************************************************************************************
+# Individual ASV Responses (1. IndicSpecies Analysis, 2. TITAN)
+
+# Indicator Species Analysis
+```{r}
+library(indicspecies)
+
+# By temp
+indval.temp <- multipatt(pred.vst, pred.samples$Temperature, control = how(nperm=999))
+sum.indval.temp <- summary(indval.temp)
+
+# By temp*time
+pred.samples$TempTime <- paste(pred.samples$Temperature,pred.samples$Incubation)
+indval.temptime <- multipatt(pred.vst, pred.samples$TempTime, control = how(nperm=999))
+sum.indval.temptime <- summary(indval.temptime)
+
+# By predator treatment
+indval.protist <- multipatt(pred.vst, pred.samples$Protist, control = how(nperm=999))
+sum.indval.protist <- summary(indval.protist)
+```
+
+# Threshold Indicator Taxa Analysis (TITAN)
+```
+https://rdrr.io/cran/TITAN2/f/inst/doc/titan2-intro.pdf
+```
+### Load package
+```{r}
+library("TITAN2")
+```
+
+### Indicator ASVs of Colpidium density
+```{r}
+#filtered ASVs present in less than 3 samples
+taxa <-read.table('MicrobPred_vst_positive_filtered_Colpi.txt', header = T, check.names = FALSE, sep = "\t")
+env<-read.table('env_Colpi_density.txt', header = T)
+
+Colpi.titan <- titan(env, taxa,
+minSplt = 5, numPerm = 250, boot = TRUE, nBoot = 500, imax = FALSE,
+ivTot = FALSE, pur.cut = 0.75, rel.cut = 0.75, ncpus = 6, memory = FALSE
+)
+
+# Plot results
+plot_sumz_density(Colpi.titan, ribbon = FALSE, points = TRUE, xlabel = "Colpidium abundance (inds/mL)")
+plot_sumz(Colpi.titan, filter = TRUE)
+plot_taxa_ridges(Colpi.titan, xlabel = "Colpidium abundance (inds/mL")
+
+# Export results, change-points
+write.table(Colpi.titan$sppmax, "TITAN_Colpi_taxaresults.txt")
+write.table(Colpi.titan$sumz.cp, "TITAN_Colpi_Changepoints.txt")
+```
+
+### Indicator ASVs of Colpidium cell size
+```{r}
+#filtered ASVs present in less than 3 samples
+taxa <-read.table('MicrobPred_vst_positive_filtered_Colpi.txt', header = T, check.names = FALSE, sep = "\t")
+env<-read.table('env_Colp_cellsize.txt', header = T)
+
+Colpi.titan <- titan(env, taxa,
+minSplt = 5, numPerm = 250, boot = TRUE, nBoot = 500, imax = FALSE,
+ivTot = FALSE, pur.cut = 0.75, rel.cut = 0.75, ncpus = 6, memory = FALSE
+)
+
+# Plot results
+plot_sumz_density(Colpi.titan, ribbon = FALSE, points = TRUE, xlabel = "Colpidium cell size")
+plot_sumz(Colpi.titan, filter = TRUE)
+plot_taxa_ridges(Colpi.titan, xlabel = "Colpidium cell size")
+
+# Export results, change-points
+write.table(Colpi.titan$sppmax, "TITAN_Colp_cellsize_taxaresults.txt")
+write.table(Colpi.titan$sumz.cp, "TITAN_Colp_cellsize_Changepoints.txt")
+```
+
+
+### Indicator ASVs of Tetrahymena density
+```{r}
+#filtered ASVs present in less than 3 samples
+taxa <-read.table('MicrobPred_vst_positive_filtered_Tetr.txt', header = T, check.names = FALSE, sep = "\t")
+env<-read.table('env_Tetr_density.txt', header = T)
+
+Tetr.titan <- titan(env, taxa,
+minSplt = 5, numPerm = 250, boot = TRUE, nBoot = 500, imax = FALSE,
+ivTot = FALSE, pur.cut = 0.75, rel.cut = 0.75, ncpus = 6, memory = FALSE
+)
+
+# Plot results
+plot_sumz_density(Tetr.titan, ribbon = FALSE, points = TRUE, xlabel = "Tetrahymena abundance (inds/mL)")
+plot_sumz(Tetr.titan, filter = TRUE)
+plot_taxa_ridges(Tetr.titan, xlabel = "Tetrahymena abundance (inds/mL")
+
+# Export results, change-points
+write.table(Tetr.titan$sppmax, "TITAN_Tetr_taxaresults.txt")
+write.table(Tetr.titan$sumz.cp, "TITAN_Tetr_Changepoints.txt")
+```
+
+### Indicator ASVs of Tetrahymena cell size
+```{r}
+#filtered ASVs present in less than 3 samples
+taxa <-read.table('MicrobPred_vst_positive_filtered_Tetr.txt', header = T, check.names = FALSE, sep = "\t")
+env<-read.table('env_Tetr_cellsize.txt', header = T)
+
+Tetr.titan <- titan(env, taxa,
+minSplt = 5, numPerm = 250, boot = TRUE, nBoot = 500, imax = FALSE,
+ivTot = FALSE, pur.cut = 0.75, rel.cut = 0.75, ncpus = 6, memory = FALSE
+)
+
+# Plot results
+plot_sumz_density(Tetr.titan, ribbon = FALSE, points = TRUE, xlabel = "Tetrahymena cell size")
+plot_sumz(Tetr.titan, filter = TRUE)
+plot_taxa_ridges(Tetr.titan, xlabel = "Tetrahymena cell size")
+
+# Export results, change-points
+write.table(Tetr.titan$sppmax, "TITAN_Tetr_cellsize_taxaresults.txt")
+write.table(Tetr.titan$sumz.cp, "TITAN_Tetr_cellsize_Changepoints.txt")
+```
+
+***************************************************************************************
+# Pruning phylogeny for iTOL display of Responder ASVs
+```{r}
+library("phyloseq"); packageVersion("phyloseq")
+library(picante)
+
+# Read in Files
+pred.comm <- read.delim("Respond_ASVs_table.txt",header=T,row.names=1) # DUMMY ASV table of just responders
+pred.comm <- as.matrix(pred.comm)
+pred.comm <- t(pred.comm)
+pred.tree <- read_tree("MicrobPred_incubation.tre")
+
+# Subset table for the 16S set of terminal nodes in the tree.
+matchphycom = match.phylo.comm(pred.tree, pred.comm) # Prunes the full community table to the 16S tree terminal nodes
+phylogeny <- matchphycom$phy
+write.tree(phylogeny, "MicrobPred_JustResponders.tre")
+```
