@@ -2,7 +2,7 @@ Repository for: Rocca, JD, Yammine, A, Simonin, M., Gibert, JP. In Review. Preda
 
 Here we assess whether predation by one of the most important bacterial consumers globally – protists – influences the temperature response of microbial community structure and function. To do so, we factorially exposed freshwater microbial communities to two cosmopolitan species of protists at two different temperatures, in a month-long microcosm experiment. We found increased microbial biomass, respiration, and shifts in microbial community structure with elevated temperature. These temperature responses also that changed in systematically withays over time. Protists influenced microbial biomass and function through effects on community structure. Interestingly, predation reduced microbial respiration rate at elevated temperature. Indicator species and TITAN analyses showed that protist identity, density, and cell size alter microbial community structure. Our study supports previous findings that temperature is an important driver of microbial communities, but also demonstrates new ways in which predation can mediate these responses to warming, with important consequences for the global carbon cycle and future warming.
 
-This project contains the following code used in the analysis of this study:
+The following code was used in the analysis of this study:
 1. Determining estimated rates of respiration based on oxygen consumption
 2. Analysis of microbial respiration and biomass (using OD600)
 3. Bioinformatic handling of the 16S Illumina sequence data, and subsequent analysis
