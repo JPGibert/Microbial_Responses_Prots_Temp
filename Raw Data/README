@@ -1,1 +1,3 @@
-This folder contains OD600, Respiration and Protist trait raw data
+This folder contains OD600 (Spec.xlsx), Respiration (T12_data and T24_data folders, separated by day: either day 12 or day 24) and Protist trait (Master_dataset_prot_traits.csv) raw data.
+
+Each dataset has an associated R code (in main branch that extracts the data from the data files and reproduces the analyses presented in the paper).
