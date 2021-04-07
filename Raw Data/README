@@ -2,6 +2,6 @@ This folder contains OD600 (Spec.xlsx), Respiration (T12_data and T24_data folde
 
 Each dataset has an associated R code (in main branch that extracts the data from the data files and reproduces the analyses presented in the paper).
 
-1. OD600 data is paired with R code:
-2. Respirometry data is paired with R code:
-3. Protist trait data is paired with R code:
+1. OD600 data is paired with R code: Spec_analyses_Git.R
+2. Respirometry data is paired with R code: Respirometry_analysis_Git.R
+3. Protist trait data is paired with R code: Prot_trait_analysis_Git.R
