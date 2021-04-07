@@ -3,16 +3,16 @@ Repository for: Rocca, JD, Yammine, A, Simonin, M., Gibert, JP. In Review. Preda
 Here we assess whether predation by one of the most important bacterial consumers globally – protists – influences the temperature response of microbial community structure and function. To do so, we factorially exposed freshwater microbial communities to two cosmopolitan species of protists at two different temperatures, in a month-long microcosm experiment. We found increased microbial biomass, respiration, and shifts in microbial community structure with elevated temperature. These temperature responses also that changed in systematically withays over time. Protists influenced microbial biomass and function through effects on community structure. Interestingly, predation reduced microbial respiration rate at elevated temperature. Indicator species and TITAN analyses showed that protist identity, density, and cell size alter microbial community structure. Our study supports previous findings that temperature is an important driver of microbial communities, but also demonstrates new ways in which predation can mediate these responses to warming, with important consequences for the global carbon cycle and future warming.
 
 The following code was used in the analysis of this study:
-1. Determining estimated rates of respiration based on oxygen consumption
-2. Analysis of microbial respiration and biomass (using OD600)
-3. Bioinformatic handling of the 16S Illumina sequence data, and subsequent analysis
+1. Determining estimated rates of respiration based on oxygen consumption -----------------(CODE: Respirometry_analysis_Git.R)
+2. Analysis of microbial respiration and biomass (using OD600) ----------------------------(CODE: Spec_analyses_Git.R)
+3. Bioinformatic handling of the 16S Illumina sequence data, and subsequent analysis-------(CODE: MicrobPred_Bioinformatics.Rmd)
     a. Dada2 determination of ASVs, followed by Lulu curation 
     b. Removal of non-16S rRNA organisms
     c. Estimation and analysis of rarefied ASV table
     d. Preparing transformed data (VST) of unrarefied ASV table
     e. Analysis of treatments on community composition and dispersion
     f. Identification of ASVs responding to experimental treatments
-4. Quantifying change sin protists traits over time and with temperature
+4. Quantifying change sin protists traits over time and with temperature-------------------(CODE: Prot_trait_analysis_Git.R)
 
 Raw sequence data for this project is open-access and available on ENA-EMBL:
     Project accession: PRJEB44142
